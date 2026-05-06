@@ -1,0 +1,350 @@
+Build a Node.js + Express REST API backend for SkinScan AI — an AI skin and hair fall tracker for India.
+
+=== TECH STACK ===
+- Runtime: Node.js 20 with Express 4
+- Database: Supabase (PostgreSQL) — use @supabase/supabase-js client
+- Image storage: Supabase Storage — use @supabase/supabase-js client (storage.from('skinscan.ai photos'))
+- AI: Google Gemini API (Gemini 1.5 Flash) — use @google/generative-ai npm package
+- Auth: Firebase Admin SDK (OTP verification) + JWT (jsonwebtoken)
+- Payments: Razorpay — use razorpay npm package
+- Image processing: sharp (resize + compress before sending to Gemini)
+- File upload: multer (memory storage, no disk)
+- Push notifications: Firebase Admin SDK (FCM)
+- Validation: zod
+- CORS: allow your Lovable frontend URL
+
+=== ENVIRONMENT VARIABLES NEEDED (.env) ===
+PORT=3000
+SUPABASE_URL=
+SUPABASE_SERVICE_KEY=
+SUPABASE_STORAGE_BUCKET=skinscan.ai photos
+GEMINI_API_KEY=
+FIREBASE_SERVICE_ACCOUNT_JSON=  # stringified JSON
+RAZORPAY_KEY_ID=
+RAZORPAY_SECRET=
+JWT_SECRET=
+JWT_REFRESH_SECRET=
+FRONTEND_URL=https://your-lovable-app.lovable.app
+
+=== DATABASE SETUP ===
+Run these SQL migrations in Supabase SQL editor:
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE TYPE skin_type_enum AS ENUM ('oily','dry','combination','normal');
+CREATE TYPE hair_type_enum AS ENUM ('straight','wavy','curly','coily');
+CREATE TYPE concern_enum AS ENUM ('skin','hair','both');
+CREATE TYPE severity_enum AS ENUM ('mild','moderate','serious');
+CREATE TYPE scan_type_enum AS ENUM ('face','hair');
+CREATE TYPE payment_status_enum AS ENUM ('created','paid','failed');
+CREATE TYPE plan_enum AS ENUM ('monthly','yearly');
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone VARCHAR(15) UNIQUE,
+  email VARCHAR(255),
+  name VARCHAR(100) NOT NULL,
+  age INTEGER,
+  skin_type skin_type_enum,
+  hair_type hair_type_enum,
+  concern concern_enum DEFAULT 'both',
+  language VARCHAR(5) DEFAULT 'en',
+  reminder_time TIME DEFAULT '08:00',
+  is_subscribed BOOLEAN DEFAULT false,
+  sub_expires TIMESTAMP,
+  streak INTEGER DEFAULT 0,
+  last_task_date DATE,
+  fcm_token TEXT,
+  created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE scans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  scan_type scan_type_enum NOT NULL,
+  image_url TEXT,
+  score DECIMAL(3,1),
+  severity severity_enum,
+  percentile INTEGER,
+  condition_raw JSONB,
+  remedies JSONB,
+  created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE tracker_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  task_date DATE NOT NULL,
+  task_key VARCHAR(100),
+  task_title VARCHAR(200),
+  task_icon VARCHAR(50),
+  category VARCHAR(50),
+  duration_minutes INTEGER DEFAULT 10,
+  is_premium BOOLEAN DEFAULT false,
+  completed BOOLEAN DEFAULT false,
+  completed_at TIMESTAMP,
+  UNIQUE(user_id, task_date, task_key)
+);
+
+CREATE TABLE payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id),
+  razorpay_order_id VARCHAR(100),
+  razorpay_payment_id VARCHAR(100),
+  plan plan_enum,
+  amount INTEGER,
+  status payment_status_enum DEFAULT 'created',
+  created_at TIMESTAMP DEFAULT now()
+);
+
+=== PROJECT STRUCTURE ===
+src/
+  index.js              # Express app setup, CORS, routes mount
+  middleware/
+    auth.js             # JWT verify middleware
+    upload.js           # multer config (memory, 5MB limit)
+  routes/
+    auth.js             # /api/auth/*
+    user.js             # /api/user/*
+    scan.js             # /api/scan/*
+    tracker.js          # /api/tracker/*
+    payment.js          # /api/payment/*
+  services/
+    ai.js               # Gemini 1.5 Flash call + response parser
+    storage.js          # Supabase Storage upload/delete/signed-url
+    firebase.js         # Firebase Admin init + FCM + OTP verify
+    notifications.js    # FCM push logic
+    remedies.js         # Remedy library + personalization logic
+  utils/
+    percentile.js       # Calculate score percentile vs user's age group
+    imageQuality.js     # Server-side image validation
+
+=== IMPLEMENT THESE ROUTES EXACTLY ===
+--- AUTH ROUTES (/api/auth) ---
+POST /api/auth/send-otp
+  Body: { phone: string }
+  Action: Use Firebase Auth REST API to send SMS OTP
+  Response: { success: true, message: "OTP sent" }
+
+POST /api/auth/register
+  Body: { phone, otp, name, age, skin_type, hair_type, concern }
+  Action:
+    1. Verify OTP with Firebase Admin verifyIdToken or custom token flow
+    2. Check if user with phone already exists in Supabase
+    3. If not: INSERT into users table
+    4. Generate JWT access token (15min) + refresh token (30 days)
+       Payload: { user_id, phone, is_subscribed }
+  Response: { access_token, refresh_token, user: { id, name, is_subscribed } }
+
+POST /api/auth/login
+  Body: { phone, otp }
+  Action: Verify OTP, find user, generate tokens
+  Response: same as register
+
+POST /api/auth/refresh
+  Body: { refresh_token }
+  Action: Verify refresh token, issue new access token
+  Response: { access_token }
+
+--- USER ROUTES (/api/user) [ALL REQUIRE AUTH] ---
+GET /api/user/dashboard
+  Action:
+    1. Get user's last face scan and last hair scan
+    2. Get today's tracker completion % (completed tasks / total tasks)
+    3. Get current streak
+    4. Get seasonal banner content (derive from current month)
+  Response: {
+    last_face_scan: { score, severity, created_at, trend } | null,
+    last_hair_scan: { score, severity, created_at, trend } | null,
+    tracker_completion: number,  // 0-100
+    streak: number,
+    seasonal_banner: { title, tip, mode }
+  }
+  Note: trend = 'up'|'down'|'stable' compared to previous scan of same type
+
+GET /api/user/profile
+  Response: full user object
+
+PATCH /api/user/preferences
+  Body: { reminder_time?, language?, fcm_token?, notifications_enabled? }
+  Action: UPDATE users SET ... WHERE id = user_id
+  Response: updated user object
+
+GET /api/user/scan-history
+  Response: array of scans ordered by created_at DESC
+
+DELETE /api/user/photos
+  Action:
+    1. Get all scans for user with image_url
+    2. Delete each from Supabase Storage
+    3. UPDATE scans SET image_url = null WHERE user_id = user_id
+  Response: { deleted_count: number }
+
+--- SCAN ROUTES (/api/scan) [ALL REQUIRE AUTH] ---
+POST /api/scan/analyze
+  Content-Type: multipart/form-data
+  Body: image (file), scan_type ('face'|'hair')
+  Action:
+    1. Validate: scan_type must be 'face' or 'hair'
+    2. Validate image: check size < 5MB, is image MIME type
+    3. Use sharp to resize to max 1024px width, convert to JPEG quality 85
+    4. Upload compressed image to Supabase Storage: bucket = "skinscan-images", path = "scans/{user_id}/{uuid}.jpg"
+    5. Get public URL for the uploaded image
+    6. Call Gemini 1.5 Flash with the image data/URL:
+       - Include the system prompt (see below)
+       - Parse JSON response strictly
+       - If image_quality === 'poor': return 400 error with quality guidance
+    7. Calculate percentile:
+       SELECT COUNT(*) FROM scans s
+       JOIN users u ON s.user_id = u.id
+       WHERE u.age BETWEEN $userAge-5 AND $userAge+5
+         AND s.scan_type = $scan_type
+         AND s.score < $newScore
+       Divide by total scans in age group * 100
+    8. Get personalized remedies from remedies service based on:
+       - scan_type, severity, skin_type (from user profile), category from AI response
+    9. INSERT into scans table
+    10. Return result
+  Response: { scan_id, score, severity, percentile, remedies, condition_raw }
+
+  Gemini System Prompt:
+  "You are a non-diagnostic skin analysis assistant. Analyze skin photos for
+  general severity scoring only. Never diagnose medical conditions. Never
+  recommend medicines. Return ONLY valid JSON. For face scans:
+  {score(1.0-10.0), severity('mild'|'moderate'|'serious'),
+  primary_concern(string, no medical terms), contributing_factors([string]),
+  remedy_categories([string]), confidence(0-1), image_quality('good'|'fair'|'poor')}
+  For hair scans:
+  {score(1.0-10.0), severity('mild'|'moderate'|'serious'),
+  recession_pattern('none'|'early'|'moderate'|'advanced'),
+  density_assessment('normal'|'thinning'|'sparse'),
+  remedy_categories([string]), confidence(0-1), image_quality('good'|'fair'|'poor')}"
+
+GET /api/scan/result/:scan_id
+  Action: SELECT from scans WHERE id = scan_id AND user_id = auth.user_id
+  Response: full scan object including remedies[]
+
+--- TRACKER ROUTES (/api/tracker) [ALL REQUIRE AUTH] ---
+GET /api/tracker/today
+  Action:
+    1. Check if tasks exist for today (task_date = CURRENT_DATE)
+    2. If not: generate today's tasks based on:
+       - User's skin_type and concern from profile
+       - Day number in their journey (calculate from account creation date)
+       - Is user subscribed? (determines how many tasks: 3 free, 8 paid)
+       - INSERT generated tasks for today
+    3. Return tasks with completed status
+  Response: {
+    tasks: [{ id, task_key, task_title, task_icon, category, duration_minutes, is_premium, completed }],
+    streak: number,
+    completion_percentage: number
+  }
+
+  Task generation logic (implement in remedies.js):
+  - Maintain a TASK_LIBRARY array of 90+ tasks with metadata
+  - Rotate through library based on day_number % library_length
+  - Always include: 1 morning, 1 diet, 1 evening task for free users
+  - Paid users get: 2 morning, 2 diet, 2 evening, 2 sleep tasks
+  - Seasonally adjust: inject monsoon/summer/winter tasks based on current month
+
+PATCH /api/tracker/task/:task_id/complete
+  Body: { completed: true }
+  Action:
+    1. UPDATE tracker_tasks SET completed=true, completed_at=now()
+       WHERE id = task_id AND user_id = auth.user_id
+    2. Check if all of today's tasks are completed:
+       If yes: check if yesterday also had all tasks completed
+       If yesterday complete: UPDATE users SET streak = streak + 1
+       If not: UPDATE users SET streak = 1
+    3. UPDATE users SET last_task_date = CURRENT_DATE
+  Response: { completed: true, streak: number, all_done: boolean }
+
+GET /api/tracker/history
+  Action: Get last 8 weekly scan scores (one per week, averaged if multiple)
+  Query:
+    SELECT DATE_TRUNC('week', created_at) as week,
+           AVG(score) as avg_score, scan_type
+    FROM scans
+    WHERE user_id = $1 AND created_at > NOW() - INTERVAL '8 weeks'
+    GROUP BY week, scan_type
+    ORDER BY week ASC
+  Response: { face_history: [{week, score}], hair_history: [{week, score}] }
+
+GET /api/tracker/comparison-photos
+  Action:
+    SELECT id, image_url, score, created_at FROM scans
+    WHERE user_id = $1 AND scan_type = $2 AND image_url IS NOT NULL
+    ORDER BY created_at ASC LIMIT 1;  -- first scan
+    -- and ORDER BY created_at DESC LIMIT 1; -- latest scan
+  Response: { first: { image_url, score, date }, latest: { image_url, score, date } }
+
+--- PAYMENT ROUTES (/api/payment) [ALL REQUIRE AUTH] ---
+POST /api/payment/create-order
+  Body: { plan: 'monthly'|'yearly' }
+  Action:
+    1. amount = plan === 'monthly' ? 14900 : 99900  // paise
+    2. Create Razorpay order: razorpay.orders.create({ amount, currency:'INR', receipt: uuid })
+    3. INSERT into payments (user_id, razorpay_order_id, plan, amount, status='created')
+  Response: { order_id, amount, currency, key_id: process.env.RAZORPAY_KEY_ID }
+
+POST /api/payment/verify
+  Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
+  Action:
+    1. Verify HMAC signature:
+       expected = HMAC-SHA256(order_id + '|' + payment_id, RAZORPAY_SECRET)
+       if expected !== razorpay_signature: return 400 'Invalid signature'
+    2. UPDATE payments SET status='paid', razorpay_payment_id=$1
+       WHERE razorpay_order_id = $2
+    3. Get plan from payments record
+    4. expires = plan === 'monthly' ? now + 30 days : now + 365 days
+    5. UPDATE users SET is_subscribed=true, sub_expires=expires WHERE id=user_id
+    6. Send FCM push: "Your SkinScan AI tracker is now unlocked! Start your full plan."
+  Response: { success: true, sub_expires: string }
+
+GET /api/payment/status
+  Action: Check current user's subscription status
+  Response: { is_subscribed: boolean, sub_expires: string | null }
+
+=== REMEDIES LIBRARY (implement in src/services/remedies.js) ===
+Export a REMEDY_LIBRARY array with 90+ entries. Each entry:
+{
+  key: 'neem_paste',
+  title: 'Apply Neem Paste',
+  icon: 'Leaf',  // Phosphor icon name
+  category: 'morning',
+  duration_minutes: 10,
+  is_premium: false,
+  applicable_to: ['face'],  // 'face'|'hair'|'both'
+  skin_types: ['oily','combination'],  // which skin types this applies to
+  severity: ['mild','moderate','serious'],  // when to show
+  season: null,  // or 'monsoon'|'summer'|'winter' for seasonal tasks
+  description: 'Mix neem powder with rose water into a paste...'
+}
+
+Include tasks covering:
+Face: neem paste, aloe vera gel, turmeric + honey mask, multani mitti pack, rose water toner, ice cube massage, green tea steam, castor oil spot treatment
+Hair: coconut oil massage, onion juice application, amla powder pack, bhringraj oil, egg mask, curd + fenugreek mask, scalp massage technique
+Diet: reduce sugar, reduce dairy, increase zinc foods (pumpkin seeds), drink 3 glasses water before 10am, green tea, avoid fried food today
+Sleep: change pillowcase, elevate pillow slightly, no phone 30min before sleep
+Lifestyle: wipe sweat immediately, clean spectacles daily, do not touch face
+
+=== SCHEDULED JOBS ===
+Use node-cron for:
+1. Daily at 8:00am IST: send FCM push to all users with reminder enabled
+   Message: personalized based on current season and user's streak
+2. Daily at midnight: delete scans older than 90 days from Supabase Storage + nullify image_url
+3. Daily: check sub_expires, deactivate expired subscriptions
+
+=== ERROR HANDLING ===
+All routes wrapped in try/catch.
+Standard error response: { error: string, code: string }
+Status codes: 400 bad request, 401 unauthorized, 403 forbidden, 404 not found, 500 server error
+Log errors to console with timestamp and route.
+
+=== CORS CONFIG ===
+app.use(cors({
+  origin: process.env.FRONTEND_URL,
+  credentials: true,
+  methods: ['GET','POST','PATCH','DELETE','OPTIONS']
+}));
+
+=== PACKAGE.JSON DEPENDENCIES ===
+express, @supabase/supabase-js, @google/generative-ai, firebase-admin, razorpay, sharp, multer, jsonwebtoken, zod, cors, dotenv, node-cron, uuid
