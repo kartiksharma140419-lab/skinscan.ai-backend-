@@ -217,6 +217,9 @@ importers:
       uuid:
         specifier: ^14.0.0
         version: 14.0.0
+      ws:
+        specifier: ^8.20.0
+        version: 8.20.0
       zod:
         specifier: 'catalog:'
         version: 3.25.76
@@ -248,6 +251,9 @@ importers:
       '@types/uuid':
         specifier: ^11.0.0
         version: 11.0.0
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       esbuild:
         specifier: 0.27.3
         version: 0.27.3

@@ -28,6 +28,7 @@
     "razorpay": "^2.9.6",
     "sharp": "^0.34.5",
     "uuid": "^14.0.0",
+    "ws": "^8.20.0",
     "zod": "catalog:"
   },
   "devDependencies": {
@@ -40,6 +41,7 @@
     "@types/node-cron": "^3.0.11",
     "@types/sharp": "^0.32.0",
     "@types/uuid": "^11.0.0",
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.27.3",
     "esbuild-plugin-pino": "^2.3.3",
     "pino-pretty": "^13",
