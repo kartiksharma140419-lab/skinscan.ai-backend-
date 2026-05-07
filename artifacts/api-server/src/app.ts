@@ -1,8 +1,9 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import router from "./routes";
-import { logger } from "./lib/logger";
+import router from "./routes/index.js";
+import { logger } from "./lib/logger.js";
+import { startCronJobs } from "./services/cron.js";
 
 const app: Express = express();
 
@@ -25,10 +26,23 @@ app.use(
     },
   }),
 );
-app.use(cors());
+
+app.use(
+  cors({
+    origin: process.env["FRONTEND_URL"] ?? "*",
+    credentials: true,
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  }),
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
+
+// Start scheduled cron jobs (outside test environments)
+if (process.env["NODE_ENV"] !== "test") {
+  startCronJobs();
+}
 
 export default app;
