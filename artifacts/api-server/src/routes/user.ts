@@ -134,6 +134,10 @@ const PrefsSchema = z.object({
   notifications_enabled: z.boolean().optional(),
 });
 
+const PhoneSchema = z.object({
+  phone_number: z.string().min(7).max(15),
+});
+
 // PATCH /api/user/preferences
 router.patch("/preferences", async (req: AuthRequest, res) => {
   try {
@@ -184,6 +188,34 @@ router.get("/scan-history", async (req: AuthRequest, res) => {
     res.json(scans ?? []);
   } catch (err) {
     req.log.error({ err }, "scan-history error");
+    res.status(500).json({ error: "Internal server error", code: "SERVER_ERROR" });
+  }
+});
+
+// PATCH /api/user/phone
+router.patch("/phone", async (req: AuthRequest, res) => {
+  try {
+    const parsed = PhoneSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid phone number", code: "VALIDATION_ERROR" });
+      return;
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .update({ phone_number: parsed.data.phone_number })
+      .eq("id", req.userId!)
+      .select("id, phone_number")
+      .single();
+
+    if (error) {
+      res.status(500).json({ error: "Failed to update phone number", code: "SERVER_ERROR" });
+      return;
+    }
+
+    res.json({ success: true, phone_number: user.phone_number });
+  } catch (err) {
+    req.log.error({ err }, "update phone error");
     res.status(500).json({ error: "Internal server error", code: "SERVER_ERROR" });
   }
 });
