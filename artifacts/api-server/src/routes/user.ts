@@ -171,6 +171,27 @@ router.patch("/preferences", async (req: AuthRequest, res) => {
   }
 });
 
+// GET /api/user/profile
+router.get("/profile", async (req: AuthRequest, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", req.userId!)
+      .single();
+
+    if (error || !user) {
+      res.status(404).json({ error: "User not found", code: "NOT_FOUND" });
+      return;
+    }
+
+    res.json(user);
+  } catch (err) {
+    req.log.error({ err }, "profile error");
+    res.status(500).json({ error: "Internal server error", code: "SERVER_ERROR" });
+  }
+});
+
 // GET /api/user/scan-history
 router.get("/scan-history", async (req: AuthRequest, res) => {
   try {
