@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 
 export interface AuthRequest extends Request {
   userId?: string;
-  userPhone?: string;
+  userEmail?: string;
   isSubscribed?: boolean;
 }
 
@@ -28,11 +28,11 @@ export function requireAuth(
   try {
     const payload = jwt.verify(token, secret) as {
       user_id: string;
-      phone: string;
+      email: string;
       is_subscribed: boolean;
     };
     req.userId = payload.user_id;
-    req.userPhone = payload.phone;
+    req.userEmail = payload.email;
     req.isSubscribed = payload.is_subscribed;
     next();
   } catch {
