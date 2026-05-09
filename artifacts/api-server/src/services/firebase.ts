@@ -19,16 +19,6 @@ function getFirebaseApp(): admin.app.App {
   return app;
 }
 
-export function getAuth(): admin.auth.Auth {
-  return getFirebaseApp().auth();
-}
-
 export function getMessaging(): admin.messaging.Messaging {
   return getFirebaseApp().messaging();
-}
-
-export async function verifyFirebaseIdToken(idToken: string): Promise<string> {
-  const auth = getAuth();
-  const decoded = await auth.verifyIdToken(idToken);
-  return decoded.phone_number ?? decoded.uid;
 }
