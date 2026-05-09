@@ -1,33 +1,29 @@
 import { Router } from "express";
 import jwt from "jsonwebtoken";
+import nodemailer from "nodemailer";
 import { z } from "zod";
 import { supabase } from "../lib/supabase.js";
-import { verifyFirebaseIdToken } from "../services/firebase.js";
+import { saveOTP, verifyOTP, isEmailVerified, clearVerifiedEmail } from "../utils/otpStore.js";
 
 const router = Router();
 
-const SendOtpSchema = z.object({ phone: z.string().min(10).max(15) });
+function generateOTP(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
 
-const RegisterSchema = z.object({
-  phone: z.string().min(10).max(15),
-  firebase_id_token: z.string(),
-  name: z.string().min(1).max(100),
-  age: z.number().int().min(10).max(100).optional(),
-  skin_type: z.enum(["oily", "dry", "combination", "normal"]).optional(),
-  hair_type: z.enum(["straight", "wavy", "curly", "coily"]).optional(),
-  concern: z.enum(["skin", "hair", "both"]).optional(),
-});
-
-const LoginSchema = z.object({
-  phone: z.string().min(10).max(15),
-  firebase_id_token: z.string(),
-});
-
-const RefreshSchema = z.object({ refresh_token: z.string() });
+function createTransporter() {
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env["GMAIL_USER"],
+      pass: process.env["GMAIL_PASS"],
+    },
+  });
+}
 
 function generateTokens(payload: {
   user_id: string;
-  phone: string;
+  email: string;
   is_subscribed: boolean;
 }): { access_token: string; refresh_token: string } {
   const jwtSecret = process.env["JWT_SECRET"]!;
@@ -41,20 +37,79 @@ function generateTokens(payload: {
   return { access_token, refresh_token };
 }
 
+const SendOtpSchema = z.object({
+  email: z.string().email(),
+});
+
+const VerifyOtpSchema = z.object({
+  email: z.string().email(),
+  otp: z.string().length(6),
+});
+
+const RegisterSchema = z.object({
+  email: z.string().email(),
+  name: z.string().min(1).max(100),
+  age: z.number().int().min(10).max(100).optional(),
+  skin_type: z.enum(["oily", "dry", "combination", "normal"]).optional(),
+  hair_type: z.enum(["straight", "wavy", "curly", "coily"]).optional(),
+  concern: z.enum(["skin", "hair", "both"]).optional(),
+});
+
+const LoginSchema = z.object({
+  email: z.string().email(),
+});
+
+const RefreshSchema = z.object({ refresh_token: z.string() });
+
 // POST /api/auth/send-otp
-// Note: actual OTP sending is handled by Firebase Auth on the client side.
-// This endpoint exists as a compatibility shim / confirmation endpoint.
 router.post("/send-otp", async (req, res) => {
   try {
     const parsed = SendOtpSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "Invalid phone number", code: "VALIDATION_ERROR" });
+      res.status(400).json({ success: false, message: "Invalid or missing email address" });
       return;
     }
-    res.json({ success: true, message: "OTP sent via Firebase Auth" });
+
+    const { email } = parsed.data;
+    const otp = generateOTP();
+    saveOTP(email, otp);
+
+    const transporter = createTransporter();
+    await transporter.sendMail({
+      from: process.env["GMAIL_USER"],
+      to: email,
+      subject: "Your OTP Code",
+      text: `Your OTP is: ${otp}. It is valid for 5 minutes.`,
+    });
+
+    res.json({ success: true, message: "OTP sent successfully" });
   } catch (err) {
     req.log.error({ err }, "send-otp error");
-    res.status(500).json({ error: "Internal server error", code: "SERVER_ERROR" });
+    res.status(500).json({ success: false, message: "Failed to send OTP. Please try again." });
+  }
+});
+
+// POST /api/auth/verify-otp
+router.post("/verify-otp", async (req, res) => {
+  try {
+    const parsed = VerifyOtpSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Email and 6-digit OTP are required" });
+      return;
+    }
+
+    const { email, otp } = parsed.data;
+    const valid = verifyOTP(email, otp);
+
+    if (!valid) {
+      res.status(401).json({ success: false, message: "Invalid or expired OTP" });
+      return;
+    }
+
+    res.json({ success: true, message: "OTP verified successfully" });
+  } catch (err) {
+    req.log.error({ err }, "verify-otp error");
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
@@ -67,27 +122,17 @@ router.post("/register", async (req, res) => {
       return;
     }
 
-    const { phone, firebase_id_token, name, age, skin_type, hair_type, concern } = parsed.data;
+    const { email, name, age, skin_type, hair_type, concern } = parsed.data;
 
-    // Verify Firebase ID token
-    let verifiedPhone: string;
-    try {
-      verifiedPhone = await verifyFirebaseIdToken(firebase_id_token);
-    } catch {
-      res.status(401).json({ error: "Invalid OTP / Firebase token", code: "UNAUTHORIZED" });
+    if (!isEmailVerified(email)) {
+      res.status(401).json({ error: "Email not verified. Please verify OTP first.", code: "UNAUTHORIZED" });
       return;
     }
 
-    if (verifiedPhone !== phone && !verifiedPhone.includes(phone.replace(/^\+91/, ""))) {
-      res.status(401).json({ error: "Phone number mismatch", code: "UNAUTHORIZED" });
-      return;
-    }
-
-    // Check if user exists
     const { data: existing } = await supabase
       .from("users")
-      .select("id, name, is_subscribed, phone")
-      .eq("phone", phone)
+      .select("id, name, is_subscribed, email")
+      .eq("email", email)
       .single();
 
     let user = existing;
@@ -95,8 +140,8 @@ router.post("/register", async (req, res) => {
     if (!user) {
       const { data: newUser, error } = await supabase
         .from("users")
-        .insert({ phone, name, age, skin_type, hair_type, concern })
-        .select("id, name, is_subscribed, phone")
+        .insert({ email, name, age, skin_type, hair_type, concern })
+        .select("id, name, is_subscribed, email")
         .single();
 
       if (error) {
@@ -107,9 +152,11 @@ router.post("/register", async (req, res) => {
       user = newUser;
     }
 
+    clearVerifiedEmail(email);
+
     const tokens = generateTokens({
       user_id: user.id,
-      phone: user.phone,
+      email: user.email,
       is_subscribed: user.is_subscribed,
     });
 
@@ -129,19 +176,17 @@ router.post("/login", async (req, res) => {
       return;
     }
 
-    const { phone, firebase_id_token } = parsed.data;
+    const { email } = parsed.data;
 
-    try {
-      await verifyFirebaseIdToken(firebase_id_token);
-    } catch {
-      res.status(401).json({ error: "Invalid OTP / Firebase token", code: "UNAUTHORIZED" });
+    if (!isEmailVerified(email)) {
+      res.status(401).json({ error: "Email not verified. Please verify OTP first.", code: "UNAUTHORIZED" });
       return;
     }
 
     const { data: user, error } = await supabase
       .from("users")
-      .select("id, name, is_subscribed, phone")
-      .eq("phone", phone)
+      .select("id, name, is_subscribed, email")
+      .eq("email", email)
       .single();
 
     if (error || !user) {
@@ -149,9 +194,11 @@ router.post("/login", async (req, res) => {
       return;
     }
 
+    clearVerifiedEmail(email);
+
     const tokens = generateTokens({
       user_id: user.id,
-      phone: user.phone,
+      email: user.email,
       is_subscribed: user.is_subscribed,
     });
 
@@ -184,7 +231,7 @@ router.post("/refresh", async (req, res) => {
 
     const { data: user } = await supabase
       .from("users")
-      .select("id, phone, is_subscribed")
+      .select("id, email, is_subscribed")
       .eq("id", payload.user_id)
       .single();
 
@@ -194,7 +241,7 @@ router.post("/refresh", async (req, res) => {
     }
 
     const access_token = jwt.sign(
-      { user_id: user.id, phone: user.phone, is_subscribed: user.is_subscribed },
+      { user_id: user.id, email: user.email, is_subscribed: user.is_subscribed },
       jwtSecret,
       { expiresIn: "15m" },
     );
