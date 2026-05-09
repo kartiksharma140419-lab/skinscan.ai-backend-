@@ -15,7 +15,7 @@ An AI-powered skin and hair fall tracker API for India. Analyzes face/scalp phot
 - Database: Supabase (PostgreSQL) via `@supabase/supabase-js`
 - Image storage: Supabase Storage (`skinscan-images` bucket)
 - AI: Google Gemini 1.5 Flash (`@google/generative-ai`)
-- Auth: Firebase Admin SDK (OTP verify) + JWT (access 15min, refresh 30d)
+- Auth: Email OTP via Nodemailer (Gmail SMTP) + JWT (access 15min, refresh 30d)
 - Payments: Razorpay (`razorpay`)
 - Image processing: `sharp` (resize to 1024px, JPEG 85%)
 - File upload: `multer` (memory storage, 5MB limit)
@@ -36,34 +36,37 @@ artifacts/api-server/src/
     auth.ts                   # JWT verify middleware (requireAuth)
     upload.ts                 # Multer memory-storage config (5MB)
   routes/
-    auth.ts                   # /api/auth/* — OTP, register, login, refresh
-    user.ts                   # /api/user/* — dashboard, profile, prefs, history
+    auth.ts                   # /api/auth/* — send-otp, verify-otp, register, login, refresh
+    user.ts                   # /api/user/* — dashboard, profile, prefs, history, phone
     scan.ts                   # /api/scan/* — AI photo analysis, scan results
     tracker.ts                # /api/tracker/* — daily tasks, completion, history
     payment.ts                # /api/payment/* — Razorpay orders, verify, status
   services/
     ai.ts                     # Gemini 1.5 Flash call + JSON parser
     storage.ts                # Supabase Storage upload/delete/URL helpers
-    firebase.ts               # Firebase Admin init + verifyIdToken
+    firebase.ts               # Firebase Admin init + getMessaging (push notifications only)
     notifications.ts          # FCM sendPush helper
     remedies.ts               # 90+ remedy/task library + personalisation logic
     cron.ts                   # Scheduled jobs (reminders, cleanup, sub expiry)
   utils/
     percentile.ts             # Score percentile vs age group
     imageQuality.ts           # MIME + size validation
+    otpStore.ts               # In-memory OTP store (5-min expiry) + verified email tracking
 ```
 
 ## API Routes
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | /api/auth/send-otp | — | Confirm OTP will be sent via Firebase |
-| POST | /api/auth/register | — | Verify Firebase ID token, create user, return JWT pair |
-| POST | /api/auth/login | — | Verify Firebase ID token, return JWT pair |
+| POST | /api/auth/send-otp | — | Generate 6-digit OTP and email it via Gmail SMTP |
+| POST | /api/auth/verify-otp | — | Verify OTP, mark email as verified for register/login |
+| POST | /api/auth/register | — | Create user (requires prior OTP verification), return JWT pair |
+| POST | /api/auth/login | — | Login (requires prior OTP verification), return JWT pair |
 | POST | /api/auth/refresh | — | Exchange refresh token for new access token |
 | GET | /api/user/dashboard | ✓ | Last scans, tracker %, streak, seasonal banner |
 | GET | /api/user/profile | ✓ | Full user object |
 | PATCH | /api/user/preferences | ✓ | Update language, reminder_time, fcm_token |
+| PATCH | /api/user/phone | ✓ | Store optional phone number (no verification) |
 | GET | /api/user/scan-history | ✓ | All scans DESC |
 | DELETE | /api/user/photos | ✓ | Delete all scan photos from storage |
 | POST | /api/scan/analyze | ✓ | Upload photo → Gemini AI → score + remedies |
@@ -75,6 +78,13 @@ artifacts/api-server/src/
 | POST | /api/payment/create-order | ✓ | Create Razorpay order |
 | POST | /api/payment/verify | ✓ | Verify HMAC signature, activate subscription |
 | GET | /api/payment/status | ✓ | Current subscription status |
+
+## Auth Flow
+
+1. Client calls `POST /api/auth/send-otp` with `{ email }` → server sends 6-digit OTP via Gmail
+2. Client calls `POST /api/auth/verify-otp` with `{ email, otp }` → server marks email verified (5-min window)
+3. Client calls `POST /api/auth/register` or `POST /api/auth/login` with `{ email, ...profile }` → server issues JWT pair
+4. (Optional) After login, client calls `PATCH /api/user/phone` with `{ phone_number }` to store mobile number
 
 ## Database Schema (run in Supabase SQL editor)
 
@@ -90,8 +100,8 @@ CREATE TYPE plan_enum AS ENUM ('monthly','yearly');
 
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  phone VARCHAR(15) UNIQUE,
-  email VARCHAR(255),
+  email VARCHAR(255) UNIQUE NOT NULL,
+  phone_number VARCHAR(15),
   name VARCHAR(100) NOT NULL,
   age INTEGER,
   skin_type skin_type_enum,
@@ -147,13 +157,32 @@ CREATE TABLE payments (
 );
 ```
 
+## Required Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SERVICE_KEY` | Supabase service role key |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Firebase service account JSON (for FCM push only) |
+| `JWT_SECRET` | Secret for signing access tokens |
+| `JWT_REFRESH_SECRET` | Secret for signing refresh tokens |
+| `GMAIL_USER` | Gmail address used to send OTPs |
+| `GMAIL_PASS` | Gmail App Password (generate at myaccount.google.com → Security → App passwords) |
+| `RAZORPAY_KEY_ID` | Razorpay key ID |
+| `RAZORPAY_SECRET` | Razorpay secret |
+| `FRONTEND_URL` | Frontend URL for CORS (e.g. https://yourapp.lovable.app) |
+
 ## Architecture decisions
 
-- Firebase handles OTP delivery (client-side) — server only verifies the Firebase ID token after successful OTP flow. This avoids building an OTP relay and keeps phone verification trustworthy.
+- Email OTP is generated server-side, stored in memory with 5-min expiry, and sent via Gmail SMTP (Nodemailer). No third-party OTP service needed.
+- Email must be verified via `/api/auth/verify-otp` before register or login can succeed — prevents unauthorized account creation.
+- Phone number is stored as plain text after OTP verification (no SMS sent) — optional field for user profile.
 - JWT access tokens are short-lived (15min) with long-lived refresh tokens (30d) for a secure mobile-friendly auth pattern.
 - Images are compressed to max 1024px JPEG 85% before Gemini API call AND before storage to save bandwidth and cost.
 - Remedy/task library (90+ entries) lives in code, not the DB — it's versioned with the code, easy to extend, and eliminates a DB round-trip per tracker load.
-- Supabase is accessed via service key (server-side only) — no row-level security bypass needed but RLS can be added per table later.
+- Supabase is accessed via service key (server-side only).
+- Firebase is used only for FCM push notifications — phone auth has been removed.
 
 ## Scheduled Jobs
 
@@ -173,5 +202,6 @@ CREATE TABLE payments (
 
 - Run the SQL migrations in Supabase before connecting the frontend — the API will return 500s if tables don't exist.
 - Create the `skinscan-images` bucket in Supabase Storage and set it to **public** so image URLs work without signed tokens.
-- Firebase OTP flow: the client calls Firebase Auth (sendSignInLinkToEmail or signInWithPhoneNumber), gets a Firebase ID token after verification, then passes that token to `/api/auth/register` or `/api/auth/login`.
-- `FRONTEND_URL` must be set exactly to the Lovable app URL for CORS to allow requests.
+- `GMAIL_PASS` must be a Gmail App Password, NOT the real Gmail password. Generate at myaccount.google.com → Security → App passwords.
+- `FRONTEND_URL` must be set exactly to the frontend app URL for CORS to allow requests.
+- OTP verification state is in-memory — restarting the server clears all pending OTPs.
