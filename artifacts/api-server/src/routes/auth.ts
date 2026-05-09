@@ -331,8 +331,9 @@ router.post("/google", async (req, res) => {
     let decoded;
     try {
       decoded = await getFirebaseAuth().verifyIdToken(parsed.data.id_token);
-    } catch {
-      res.status(401).json({ error: "Invalid or expired Google token", code: "UNAUTHORIZED" });
+    } catch (e: any) {
+      req.log.error({ err: e }, "Firebase token verification failed");
+      res.status(401).json({ error: e?.message || "Invalid or expired Google token", code: "UNAUTHORIZED" });
       return;
     }
 
