@@ -60,7 +60,8 @@ export function startCronJobs(): void {
             logger.error({ e, path }, "Failed to delete old scan image"),
           );
         }
-        await supabase.from("scans").update({ image_url: null }).eq("id", scan.id);
+        const { error: updErr } = await supabase.from("scans").update({ image_url: null }).eq("id", scan.id);
+        if (updErr) console.error("Failed to update scan", scan.id, updErr);
       }
 
       logger.info({ count: oldScans.length }, "Cron: cleaned old scan images");

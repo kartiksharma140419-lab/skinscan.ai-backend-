@@ -98,10 +98,11 @@ router.post("/verify", async (req: AuthRequest, res) => {
     }
 
     // Update payment record
-    await supabase
+    const { error: payErr } = await supabase
       .from("payments")
       .update({ status: "paid", razorpay_payment_id })
       .eq("razorpay_order_id", razorpay_order_id);
+    if (payErr) req.log.error({ payErr }, "Payment status update failed");
 
     // Calculate subscription expiry
     const now = new Date();
@@ -110,10 +111,11 @@ router.post("/verify", async (req: AuthRequest, res) => {
         ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
         : new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
 
-    await supabase
+    const { error: userErr } = await supabase
       .from("users")
       .update({ is_subscribed: true, sub_expires: sub_expires.toISOString() })
       .eq("id", req.userId!);
+    if (userErr) req.log.error({ userErr }, "User subscription update failed");
 
     // Send push notification
     const { data: user } = await supabase

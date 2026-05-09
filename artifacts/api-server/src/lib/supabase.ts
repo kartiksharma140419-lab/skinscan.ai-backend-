@@ -10,6 +10,7 @@ if (!supabaseUrl || !supabaseKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   realtime: {
-    transport: ws,
+    // TODO: type this — ws library's WebSocket constructor signature doesn't match Supabase's WebSocketLikeConstructor
+    transport: ws as any,
   },
 });

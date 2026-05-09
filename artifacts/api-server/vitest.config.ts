@@ -7,8 +7,8 @@ export default defineConfig({
     env: {
       SUPABASE_URL: "https://mock.supabase.co",
       SUPABASE_SERVICE_KEY: "mock-key",
-      JWT_SECRET: "mock-jwt",
-      JWT_REFRESH_SECRET: "mock-refresh",
+      JWT_SECRET: "mock-jwt-secret-needs-to-be-thirty-two-chars",
+      JWT_REFRESH_SECRET: "mock-refresh-secret-needs-to-be-thirty-two-chars",
       GMAIL_USER: "test@example.com",
       GMAIL_PASS: "mock",
       FIREBASE_SERVICE_ACCOUNT_JSON: '{"project_id":"mock"}',

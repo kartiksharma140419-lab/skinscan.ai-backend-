@@ -135,7 +135,7 @@ const PrefsSchema = z.object({
 });
 
 const PhoneSchema = z.object({
-  phone_number: z.string().min(7).max(15),
+  phone_number: z.string().min(7).max(15).regex(/^\+?[1-9]\d{1,14}$/, "Invalid phone format"),
 });
 
 // PATCH /api/user/preferences
@@ -199,7 +199,8 @@ router.get("/scan-history", async (req: AuthRequest, res) => {
       .from("scans")
       .select("*")
       .eq("user_id", req.userId!)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(100);
 
     if (error) {
       res.status(500).json({ error: "Failed to fetch scan history", code: "SERVER_ERROR" });

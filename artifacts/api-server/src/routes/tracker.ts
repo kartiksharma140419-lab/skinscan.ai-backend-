@@ -179,9 +179,10 @@ router.get("/history", async (req: AuthRequest, res) => {
       .eq("user_id", userId)
       .gte(
         "created_at",
-        new Date(Date.now() - 8 * 7 * 24 * 60 * 60 * 1000).toISOString(),
+        new Date(Date.now() - 8 * 7 * 24 * 60 * 60 * 1000).toISOString()
       )
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true })
+      .limit(100);
 
     if (error) {
       res.status(500).json({ error: "Failed to fetch history", code: "SERVER_ERROR" });
@@ -195,12 +196,13 @@ router.get("/history", async (req: AuthRequest, res) => {
       const date = new Date(scan.created_at);
       const weekStart = new Date(date);
       weekStart.setDate(date.getDate() - date.getDay());
-      const week = weekStart.toISOString().split("T")[0];
+      const week = weekStart.toISOString().split("T")[0] ?? "";
 
       if (!weekMap[week]) weekMap[week] = { face: [], hair: [] };
+      const entry = weekMap[week]!;
 
-      if (scan.scan_type === "face") weekMap[week].face.push(scan.score);
-      else weekMap[week].hair.push(scan.score);
+      if (scan.scan_type === "face") entry.face.push(scan.score);
+      else entry.hair.push(scan.score);
     }
 
     const avg = (arr: number[]) =>

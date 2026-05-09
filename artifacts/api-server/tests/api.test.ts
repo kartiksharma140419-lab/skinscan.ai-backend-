@@ -106,7 +106,7 @@ describe("Backend API Integration Tests", () => {
       
       // Mock user authentication
       // In this test, we skip standard auth and just directly call the endpoint logic,
-      const token = jwt.sign({ user_id: userId, email: "u@u.com" }, "mock-jwt");
+      const token = jwt.sign({ user_id: userId, email: "u@u.com" }, "mock-jwt-secret-needs-to-be-thirty-two-chars");
 
       // Seed users
       mockDb.users = [
@@ -136,7 +136,7 @@ describe("Backend API Integration Tests", () => {
   describe("TEST 6 - PREFERENCES SAVE + FETCH", () => {
     it("should save and retrieve notifications_enabled correctly", async () => {
       const userId = "prefs-user";
-      const token = jwt.sign({ user_id: userId, email: "u@u.com" }, "mock-jwt");
+      const token = jwt.sign({ user_id: userId, email: "u@u.com" }, "mock-jwt-secret-needs-to-be-thirty-two-chars");
 
       mockDb.users.push({ id: userId, email: "u@u.com", notifications_enabled: true });
 

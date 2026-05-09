@@ -9,11 +9,11 @@ import { getFirebaseAuth } from "../services/firebase.js";
 const JWT_SECRET = process.env["JWT_SECRET"];
 const JWT_REFRESH_SECRET = process.env["JWT_REFRESH_SECRET"];
 
-if (!JWT_SECRET) {
-  throw new Error("FATAL: JWT_SECRET environment variable is not set. Server cannot start.");
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error("FATAL: JWT_SECRET environment variable must be set and at least 32 characters long. Server cannot start.");
 }
-if (!JWT_REFRESH_SECRET) {
-  throw new Error("FATAL: JWT_REFRESH_SECRET environment variable is not set. Server cannot start.");
+if (!JWT_REFRESH_SECRET || JWT_REFRESH_SECRET.length < 32) {
+  throw new Error("FATAL: JWT_REFRESH_SECRET environment variable must be set and at least 32 characters long. Server cannot start.");
 }
 
 const router = Router();
@@ -32,13 +32,16 @@ function createTransporter() {
   });
 }
 
+const jwtSecret = process.env.JWT_SECRET as string;
+const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET as string;
+
 function generateTokens(payload: {
   user_id: string;
   email: string;
   is_subscribed: boolean;
 }): { access_token: string; refresh_token: string } {
-  const access_token = jwt.sign(payload, JWT_SECRET, { expiresIn: "15m" });
-  const refresh_token = jwt.sign({ user_id: payload.user_id }, JWT_REFRESH_SECRET, {
+  const access_token = jwt.sign(payload, jwtSecret, { expiresIn: "15m" });
+  const refresh_token = jwt.sign({ user_id: payload.user_id }, jwtRefreshSecret, {
     expiresIn: "30d",
   });
 
@@ -51,7 +54,7 @@ const SendOtpSchema = z.object({
 
 const VerifyOtpSchema = z.object({
   email: z.string().email(),
-  otp: z.string().length(6),
+  otp: z.string().length(6).regex(/^\d{6}$/, "OTP must be 6 digits"),
 });
 
 const RegisterSchema = z.object({
@@ -69,6 +72,9 @@ const LoginSchema = z.object({
 
 const RefreshSchema = z.object({ refresh_token: z.string() });
 
+const MAX_OTP_PER_WINDOW = 3;
+const WINDOW_DURATION_MS = 15 * 60 * 1000;
+
 // POST /api/auth/send-otp
 router.post("/send-otp", async (req, res) => {
   try {
@@ -78,22 +84,70 @@ router.post("/send-otp", async (req, res) => {
       return;
     }
 
-    const { email } = parsed.data;
+    const email = parsed.data.email.toLowerCase();
+    
+    // Rate limit check
+    const now = Date.now();
+    const { data: rl } = await supabase
+      .from("otp_rate_limits")
+      .select("*")
+      .eq("email", email)
+      .single();
+
+    if (rl) {
+      if (now - Number(rl.window_start) < WINDOW_DURATION_MS) {
+        if (rl.count >= MAX_OTP_PER_WINDOW) {
+          res.status(429).json({ success: false, message: "Too many OTP requests. Please wait 15 minutes." });
+          return;
+        }
+        await supabase
+          .from("otp_rate_limits")
+          .update({ count: rl.count + 1 })
+          .eq("email", email);
+      } else {
+        // Reset window
+        await supabase
+          .from("otp_rate_limits")
+          .update({ count: 1, window_start: now })
+          .eq("email", email);
+      }
+    } else {
+      await supabase
+        .from("otp_rate_limits")
+        .insert({ email, count: 1, window_start: now });
+    }
+
     const otp = generateOTP();
     await saveOTP(email, otp);
 
     const transporter = createTransporter();
-    await transporter.sendMail({
-      from: process.env["GMAIL_USER"],
-      to: email,
-      subject: "Your OTP Code",
-      text: `Your OTP is: ${otp}. It is valid for 10 minutes.`,
-    });
+    try {
+      await transporter.sendMail({
+        from: process.env["GMAIL_USER"],
+        to: email,
+        subject: "Your OTP Code",
+        text: `Your OTP is: ${otp}. It is valid for 10 minutes.`,
+      });
+    } catch (mailErr) {
+      req.log.error({ mailErr }, "Failed to send OTP email");
+      // Hardening: Delete the row so a stale OTP is not left in the DB
+      await supabase.from("otp_codes").delete().eq("email", email);
+      
+      // Rollback rate limit
+      if (rl && now - Number(rl.window_start) < WINDOW_DURATION_MS) {
+        await supabase.from("otp_rate_limits").update({ count: rl.count }).eq("email", email);
+      } else {
+        await supabase.from("otp_rate_limits").delete().eq("email", email);
+      }
+
+      res.status(500).json({ success: false, message: "Failed to send OTP email." });
+      return;
+    }
 
     res.json({ success: true, message: "OTP sent successfully" });
   } catch (err) {
     req.log.error({ err }, "send-otp error");
-    res.status(500).json({ success: false, message: "Failed to send OTP. Please try again." });
+    res.status(500).json({ success: false, message: "Failed to process OTP request. Please try again." });
   }
 });
 

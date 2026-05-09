@@ -52,10 +52,11 @@ export async function verifyOTP(
   if (error || !data) return false;
 
   // Mark as used so it cannot be replayed
-  await supabase
+  const { error: updErr } = await supabase
     .from("otp_codes")
     .update({ used: true })
     .eq("id", data.id);
+  if (updErr) console.error("Failed to mark OTP used:", updErr);
 
   return true;
 }
