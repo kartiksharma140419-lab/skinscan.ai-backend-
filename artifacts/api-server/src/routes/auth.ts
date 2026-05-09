@@ -4,6 +4,17 @@ import nodemailer from "nodemailer";
 import { z } from "zod";
 import { supabase } from "../lib/supabase.js";
 import { saveOTP, verifyOTP, isEmailVerified, clearVerifiedEmail } from "../utils/otpStore.js";
+import { getFirebaseAuth } from "../services/firebase.js";
+
+const JWT_SECRET = process.env["JWT_SECRET"];
+const JWT_REFRESH_SECRET = process.env["JWT_REFRESH_SECRET"];
+
+if (!JWT_SECRET) {
+  throw new Error("FATAL: JWT_SECRET environment variable is not set. Server cannot start.");
+}
+if (!JWT_REFRESH_SECRET) {
+  throw new Error("FATAL: JWT_REFRESH_SECRET environment variable is not set. Server cannot start.");
+}
 
 const router = Router();
 
@@ -26,11 +37,8 @@ function generateTokens(payload: {
   email: string;
   is_subscribed: boolean;
 }): { access_token: string; refresh_token: string } {
-  const jwtSecret = process.env["JWT_SECRET"]!;
-  const refreshSecret = process.env["JWT_REFRESH_SECRET"]!;
-
-  const access_token = jwt.sign(payload, jwtSecret, { expiresIn: "15m" });
-  const refresh_token = jwt.sign({ user_id: payload.user_id }, refreshSecret, {
+  const access_token = jwt.sign(payload, JWT_SECRET, { expiresIn: "15m" });
+  const refresh_token = jwt.sign({ user_id: payload.user_id }, JWT_REFRESH_SECRET, {
     expiresIn: "30d",
   });
 
@@ -72,14 +80,14 @@ router.post("/send-otp", async (req, res) => {
 
     const { email } = parsed.data;
     const otp = generateOTP();
-    saveOTP(email, otp);
+    await saveOTP(email, otp);
 
     const transporter = createTransporter();
     await transporter.sendMail({
       from: process.env["GMAIL_USER"],
       to: email,
       subject: "Your OTP Code",
-      text: `Your OTP is: ${otp}. It is valid for 5 minutes.`,
+      text: `Your OTP is: ${otp}. It is valid for 10 minutes.`,
     });
 
     res.json({ success: true, message: "OTP sent successfully" });
@@ -99,7 +107,7 @@ router.post("/verify-otp", async (req, res) => {
     }
 
     const { email, otp } = parsed.data;
-    const valid = verifyOTP(email, otp);
+    const valid = await verifyOTP(email, otp);
 
     if (!valid) {
       res.status(401).json({ success: false, message: "Invalid or expired OTP" });
@@ -124,7 +132,7 @@ router.post("/register", async (req, res) => {
 
     const { email, name, age, skin_type, hair_type, concern } = parsed.data;
 
-    if (!isEmailVerified(email)) {
+    if (!(await isEmailVerified(email))) {
       res.status(401).json({ error: "Email not verified. Please verify OTP first.", code: "UNAUTHORIZED" });
       return;
     }
@@ -152,7 +160,7 @@ router.post("/register", async (req, res) => {
       user = newUser;
     }
 
-    clearVerifiedEmail(email);
+    await clearVerifiedEmail(email);
 
     const tokens = generateTokens({
       user_id: user.id,
@@ -178,7 +186,7 @@ router.post("/login", async (req, res) => {
 
     const { email } = parsed.data;
 
-    if (!isEmailVerified(email)) {
+    if (!(await isEmailVerified(email))) {
       res.status(401).json({ error: "Email not verified. Please verify OTP first.", code: "UNAUTHORIZED" });
       return;
     }
@@ -194,7 +202,7 @@ router.post("/login", async (req, res) => {
       return;
     }
 
-    clearVerifiedEmail(email);
+    await clearVerifiedEmail(email);
 
     const tokens = generateTokens({
       user_id: user.id,
@@ -218,12 +226,9 @@ router.post("/refresh", async (req, res) => {
       return;
     }
 
-    const refreshSecret = process.env["JWT_REFRESH_SECRET"]!;
-    const jwtSecret = process.env["JWT_SECRET"]!;
-
     let payload: { user_id: string };
     try {
-      payload = jwt.verify(parsed.data.refresh_token, refreshSecret) as { user_id: string };
+      payload = jwt.verify(parsed.data.refresh_token, JWT_REFRESH_SECRET) as { user_id: string };
     } catch {
       res.status(401).json({ error: "Invalid or expired refresh token", code: "UNAUTHORIZED" });
       return;
@@ -242,13 +247,84 @@ router.post("/refresh", async (req, res) => {
 
     const access_token = jwt.sign(
       { user_id: user.id, email: user.email, is_subscribed: user.is_subscribed },
-      jwtSecret,
+      JWT_SECRET,
       { expiresIn: "15m" },
     );
 
     res.json({ access_token });
   } catch (err) {
     req.log.error({ err }, "refresh error");
+    res.status(500).json({ error: "Internal server error", code: "SERVER_ERROR" });
+  }
+});
+
+const GoogleAuthSchema = z.object({
+  id_token: z.string().min(1),
+});
+
+// POST /api/auth/google
+router.post("/google", async (req, res) => {
+  try {
+    const parsed = GoogleAuthSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "id_token is required", code: "VALIDATION_ERROR" });
+      return;
+    }
+
+    // Verify the Firebase ID token via Admin SDK
+    let decoded;
+    try {
+      decoded = await getFirebaseAuth().verifyIdToken(parsed.data.id_token);
+    } catch {
+      res.status(401).json({ error: "Invalid or expired Google token", code: "UNAUTHORIZED" });
+      return;
+    }
+
+    const email = decoded.email;
+    if (!email) {
+      res.status(400).json({ error: "Google account has no email", code: "VALIDATION_ERROR" });
+      return;
+    }
+
+    // Find or create the user
+    const { data: existing } = await supabase
+      .from("users")
+      .select("id, name, is_subscribed, email")
+      .eq("email", email)
+      .single();
+
+    let user = existing;
+
+    if (!user) {
+      const displayName = decoded.name || decoded.email?.split("@")[0] || "FRIEND";
+
+      const { data: newUser, error } = await supabase
+        .from("users")
+        .insert({ email, name: displayName.toUpperCase() })
+        .select("id, name, is_subscribed, email")
+        .single();
+
+      if (error) {
+        req.log.error({ error }, "google-auth: insert user error");
+        res.status(500).json({ error: "Failed to create user", code: "SERVER_ERROR" });
+        return;
+      }
+      user = newUser;
+    }
+
+    const tokens = generateTokens({
+      user_id: user.id,
+      email: user.email,
+      is_subscribed: user.is_subscribed,
+    });
+
+    res.json({
+      ...tokens,
+      user: { id: user.id, name: user.name, is_subscribed: user.is_subscribed },
+      is_new_user: !existing,
+    });
+  } catch (err) {
+    req.log.error({ err }, "google-auth error");
     res.status(500).json({ error: "Internal server error", code: "SERVER_ERROR" });
   }
 });

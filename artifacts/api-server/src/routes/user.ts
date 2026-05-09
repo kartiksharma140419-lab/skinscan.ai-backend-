@@ -151,7 +151,7 @@ router.patch("/preferences", async (req: AuthRequest, res) => {
     if (parsed.data.reminder_time !== undefined) updates["reminder_time"] = parsed.data.reminder_time;
     if (parsed.data.language !== undefined) updates["language"] = parsed.data.language;
     if (parsed.data.fcm_token !== undefined) updates["fcm_token"] = parsed.data.fcm_token;
-
+    if (parsed.data.notifications_enabled !== undefined) updates["notifications_enabled"] = parsed.data.notifications_enabled;
     const { data: user, error } = await supabase
       .from("users")
       .update(updates)

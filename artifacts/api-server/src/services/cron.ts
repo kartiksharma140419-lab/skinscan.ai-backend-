@@ -3,6 +3,7 @@ import { supabase } from "../lib/supabase.js";
 import { sendPush } from "./notifications.js";
 import { logger } from "../lib/logger.js";
 import { deleteImage, getPathFromUrl } from "./storage.js";
+import { cleanupExpiredOTPs } from "../utils/otpStore.js";
 
 function getSeasonalMessage(streak: number): { title: string; body: string } {
   const month = new Date().getMonth() + 1;
@@ -82,6 +83,18 @@ export function startCronJobs(): void {
       if (error) logger.error({ error }, "Cron: subscription deactivation error");
     } catch (err) {
       logger.error({ err }, "Cron: subscription check error");
+    }
+  });
+
+  // Hourly: delete expired OTP rows from the otp_codes table
+  cron.schedule("0 * * * *", async () => {
+    try {
+      const count = await cleanupExpiredOTPs();
+      if (count > 0) {
+        logger.info({ count }, "Cron: cleaned expired OTP rows");
+      }
+    } catch (err) {
+      logger.error({ err }, "Cron: OTP cleanup error");
     }
   });
 
