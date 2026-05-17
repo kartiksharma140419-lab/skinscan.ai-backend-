@@ -10,18 +10,17 @@ function getFirebaseApp(): admin.app.App {
   const privateKeyRaw = process.env["FIREBASE_PRIVATE_KEY"];
   
   if (projectId && clientEmail && privateKeyRaw) {
-    let privateKey = privateKeyRaw.replace(/\\n/g, "\n");
-    privateKey = privateKey.replace(/^"|"$/g, ""); // Remove surrounding double quotes if pasted with them
-    privateKey = privateKey.replace(/^'|'$/g, ""); // Remove surrounding single quotes
+    let privateKey = privateKeyRaw.trim();
+    privateKey = privateKey.replace(/^["']|["']$/g, ""); // Remove surrounding quotes
+    privateKey = privateKey.replace(/\\n/g, "\n"); // Replace escaped newlines
+    privateKey = privateKey.replace(/\r/g, ""); // Remove carriage returns
 
-    // If newlines were lost during copy-paste and replaced by spaces
-    if (!privateKey.includes("\n") && privateKey.includes("BEGIN PRIVATE KEY")) {
-      const match = privateKey.match(/-----BEGIN PRIVATE KEY-----(.*?)-----END PRIVATE KEY-----/);
-      if (match) {
-        const body = match[1].replace(/\s+/g, "");
-        const formattedBody = body.match(/.{1,64}/g)?.join("\n") || body;
-        privateKey = `-----BEGIN PRIVATE KEY-----\n${formattedBody}\n-----END PRIVATE KEY-----\n`;
-      }
+    // Extract the body and rebuild to ensure perfect PEM formatting
+    const match = privateKey.match(/-----BEGIN PRIVATE KEY-----\s*(.*?)\s*-----END PRIVATE KEY-----/s);
+    if (match) {
+      const body = match[1].replace(/\s+/g, "");
+      const formattedBody = body.match(/.{1,64}/g)?.join("\n") || body;
+      privateKey = `-----BEGIN PRIVATE KEY-----\n${formattedBody}\n-----END PRIVATE KEY-----\n`;
     }
 
     app = admin.initializeApp({
